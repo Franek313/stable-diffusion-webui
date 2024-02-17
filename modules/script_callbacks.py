@@ -1,3 +1,4 @@
+import dataclasses
 import inspect
 import os
 from collections import namedtuple
@@ -41,7 +42,7 @@ class ExtraNoiseParams:
 
 
 class CFGDenoiserParams:
-    def __init__(self, x, image_cond, sigma, sampling_step, total_sampling_steps, text_cond, text_uncond):
+    def __init__(self, x, image_cond, sigma, sampling_step, total_sampling_steps, text_cond, text_uncond, denoiser=None):
         self.x = x
         """Latent image representation in the process of being denoised"""
 
@@ -62,6 +63,9 @@ class CFGDenoiserParams:
 
         self.text_uncond = text_uncond
         """ Encoder hidden states of text conditioning from negative prompt"""
+
+        self.denoiser = denoiser
+        """Current CFGDenoiser object with processing parameters"""
 
 
 class CFGDenoisedParams:
@@ -103,6 +107,15 @@ class ImageGridLoopParams:
         self.rows = rows
 
 
+@dataclasses.dataclass
+class BeforeTokenCounterParams:
+    prompt: str
+    steps: int
+    styles: list
+
+    is_positive: bool = True
+
+
 ScriptCallback = namedtuple("ScriptCallback", ["script", "callback"])
 callback_map = dict(
     callbacks_app_started=[],
@@ -125,6 +138,10 @@ callback_map = dict(
     callbacks_on_reload=[],
     callbacks_list_optimizers=[],
     callbacks_list_unets=[],
+    callbacks_before_token_counter=[],
+)
+event_subscriber_map = dict(
+    callbacks_setting_updated=[],
 )
 
 
@@ -306,6 +323,31 @@ def list_unets_callback():
     return res
 
 
+def before_token_counter_callback(params: BeforeTokenCounterParams):
+    for c in callback_map['callbacks_before_token_counter']:
+        try:
+            c.callback(params)
+        except Exception:
+            report_exception(c, 'before_token_counter')
+
+
+def setting_updated_event_subscriber_chain(handler, component, setting_name: str):
+    """
+    Arguments:
+        - handler: The returned handler from calling an event subscriber.
+        - component: The component that is updated. The component should provide
+                     the value of setting after update.
+        - setting_name: The name of the setting.
+    """
+    for param in event_subscriber_map['callbacks_setting_updated']:
+        handler = handler.then(
+            fn=lambda *args: param["fn"](*args, setting_name),
+            inputs=param["inputs"] + [component],
+            outputs=param["outputs"],
+            show_progress=False,
+        )
+
+
 def add_callback(callbacks, fun):
     stack = [x for x in inspect.stack() if x.filename != __file__]
     filename = stack[0].filename if stack else 'unknown file'
@@ -480,3 +522,21 @@ def on_list_unets(callback):
     The function will be called with one argument, a list, and shall add objects of type modules.sd_unet.SdUnetOption to it."""
 
     add_callback(callback_map['callbacks_list_unets'], callback)
+
+
+def on_before_token_counter(callback):
+    """register a function to be called when UI is counting tokens for a prompt.
+    The function will be called with one argument of type BeforeTokenCounterParams, and should modify its fields if necessary."""
+
+    add_callback(callback_map['callbacks_before_token_counter'], callback)
+
+
+def on_setting_updated_subscriber(subscriber_params):
+    """register a function to be called after settings update. `subscriber_params`
+    should contain necessary fields to register an gradio event handler. Necessary
+    fields are ["fn", "outputs", "inputs"].
+    Setting name and setting value after update will be append to inputs. So be
+    sure to handle these extra params when defining the callback function.
+    """
+    event_subscriber_map['callbacks_setting_updated'].append(subscriber_params)
+
